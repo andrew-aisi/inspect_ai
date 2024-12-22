@@ -98,6 +98,18 @@ async def compose_check_running(services: list[str], project: ComposeProject) ->
             msg = ("One or more docker containers failed to start from "
                    f"{project.config}: {','.join(unhealthy_services)}")
             raise RuntimeError(msg)
+
+        # Validate `sh` binary is available in each container
+        for service in running_services:
+            service_name = service["Service"]
+            check_result = await compose_exec(
+                [service_name, "sh", "-c", "command -v sh"],
+                project=project,
+                timeout=10,
+            )
+            if not check_result.success or not check_result.stdout.strip():
+                raise RuntimeError("The 'sh' binary is not available in the container "
+                                   f"for service '{service_name}' from {project.config}")
     else:
         raise RuntimeError("No services started")
 
