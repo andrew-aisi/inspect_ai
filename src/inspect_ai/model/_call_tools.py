@@ -722,17 +722,28 @@ def truncate_tool_output(
             active_max_output = 16 * 1024
 
     # truncate if required
-    truncated = truncate_string_to_bytes(output, active_max_output)
-    if truncated:
+    truncated_start = truncate_string_to_bytes(output, active_max_output // 2)
+    truncated_end = truncate_string_to_bytes(
+        output[-active_max_output:], active_max_output // 2
+    )
+    if truncated_start:
         truncated_output = dedent("""
             The output of your call to {tool_name} was too long to be displayed.
-            Here is a truncated version:
-            <START_TOOL_OUTPUT>
-            {truncated_output}
-            <END_TOOL_OUTPUT>
-            """).format(tool_name=tool_name, truncated_output=truncated.output)
+            Here is a truncated version showing the START and the END, skipping the middle of the output
+            <BEGIN_INITIAL_TOOL_OUTPUT>
+            {truncated_start}
+            <END_INITIAL_TOOL_OUTPUT>
+            [[ middle tool output truncated ]]
+            <BEGIN_FINAL_TOOL_OUTPUT>
+            {truncated_start}
+            <END_FINAL_TOOL_OUTPUT>
+            """).format(
+            tool_name=tool_name,
+            truncated_start=truncated_start.output,
+            truncated_end=truncated_end.output,
+        )
         return TruncatedToolOutput(
-            truncated_output, truncated.original_bytes, active_max_output
+            truncated_output, truncated_start.original_bytes, active_max_output
         )
     else:
         return None
