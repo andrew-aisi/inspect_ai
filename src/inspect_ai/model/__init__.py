@@ -55,6 +55,7 @@ from ._model_output import (
     Logprobs,
     ModelOutput,
     ModelUsage,
+    IdealizedModelUsage,
     StopReason,
     TopLogprob,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "Logprobs",
     "Logprob",
     "TopLogprob",
+    "IdealizedModelUsage",
     "Model",
     "ModelAPI",
     "ModelName",

@@ -51,6 +51,48 @@ class ModelUsage(BaseModel):
             ),
         )
 
+class IdealizedModelUsage(ModelUsage):
+    """
+    Theoretical model usage, tracked as if a provider perfectly cached all inputs.
+
+    IdealizedModelUsage counts reads from the local inspect cache as contributing to
+    the tracked usage.
+
+    NOTE only a subset of ModelUsage fields are used in this class:
+    * input_tokens_cache_write stores the total number of unique tokens
+    * input_tokens stores the total input tokens used
+    * output tokens stores the total output tokens produced
+
+    Unique tokens are defined as unique suffixes when looking across all prior inputs
+    sent to a given model. When each prompt is sent to the model it will be matched
+    against the longest previous prefix sent to that model, and only the new text since
+    the match (or all text in the case of no match) will be counted as unique tokens.
+
+    Partial matches will not be counted, only entire prefixes (e.g., a turn based agent);
+    we assume caching happens at a prompt granularity. This assumption allows us to
+    use provider-reported token usage stats to understand the number of tokens (as defined
+    by any provider) in the suffix.
+
+    For example, consider the following sequence of prompts (one prompt per line). Underlined
+    text is considered unique:
+
+        part1
+        _____
+
+        part1part2
+             _____
+
+        part1part3
+             _____
+
+        part1part2part4
+                  _____
+
+        part5
+        _____
+    """
+    pass
+
 
 StopReason = Literal[
     "stop",

@@ -1,9 +1,11 @@
 import abc
 import contextlib
 import functools
+import hashlib
 import json
 import logging
 import os
+import struct
 import time
 from contextvars import ContextVar
 from copy import copy, deepcopy
@@ -93,9 +95,37 @@ from ._generate_config import (
     set_active_generate_config,
 )
 from ._model_call import ModelCall
-from ._model_output import ModelOutput, ModelUsage
+from ._model_output import (
+    IdealizedModelUsage,
+    ModelOutput,
+    ModelUsage,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class _TrieNode(dict):
+    __slots__ = ("tokens",)
+
+    def __init__(self):
+        super().__init__()
+        self.tokens: int | None = None
+
+
+def _message_signature(msg: ChatMessage) -> int:
+    """64-bit signature mapping role|name|content to uint64"""
+    role = getattr(msg, "role", "")
+    name = getattr(msg, "name", "")
+    data = f"{role}|{name}|{msg.text}".encode("utf8")
+
+    for content in [x for x in msg.content if not isinstance(x, str)]:
+        # Not yet implemented - signatures for non-text messages.
+        # Avoiding private import from inspect_ai._util.content import Content
+        if content.type != "text":
+            logger.warning("Ignoring signature for msg of type %s", content.type)
+
+    digest = hashlib.blake2b(data, digest_size=8).digest()
+    return struct.unpack("!Q", digest)[0]
 
 
 class ModelAPI(abc.ABC):
@@ -297,9 +327,18 @@ class Model:
         self._context_bound = False
         self._closed = False
 
+        # state for modeling the model usage if a provider was using an ideal cache
+        self._prefix_root = _TrieNode()
+        self._ideal_usage = IdealizedModelUsage(input_tokens_cache_write=0)
+
         # if using the Model API standalone in a notebook this will
         # get hit before score() or eval() so we activate nest_asyncio
         platform_init()
+
+    @property
+    def idealized_model_usage(self) -> IdealizedModelUsage:
+        """Cumulative *theoretical* usage of a perfect cache for this Model instance."""
+        return self._ideal_usage
 
     def __enter__(self: "Model") -> "Model":
         self._context_bound = True
@@ -611,6 +650,11 @@ class Model:
                 )
                 existing = cache_fetch(cache_entry)
                 if isinstance(existing, ModelOutput):
+                    # Update idealized-cache counters
+                    self._update_idealized_model_model_usage(
+                        messages=input,
+                        usage=existing.usage,
+                    )
                     _, event = self._record_model_interaction(
                         input=input,
                         tools=tools_info,
@@ -686,6 +730,9 @@ class Model:
             # record usage
             if output.usage:
                 # record usage
+                self._update_idealized_model_model_usage(
+                    messages=input, usage=output.usage
+                )
                 record_and_check_model_usage(f"{self}", output.usage)
 
                 # send telemetry to hooks
@@ -736,6 +783,53 @@ class Model:
 
         # no retry
         return False
+
+    def _update_idealized_model_model_usage(
+        self,
+        messages: list[ChatMessage],
+        usage: ModelUsage,
+    ) -> None:
+        total_in = (
+            (usage.input_tokens or 0)
+            + (usage.input_tokens_cache_write or 0)
+            + (usage.input_tokens_cache_read or 0)
+        )
+
+        # find longest cached prefix
+        node = self._prefix_root
+        longest_prefix_tokens = 0
+        path: list[_TrieNode] = [node]
+
+        for sig in map(_message_signature, messages):
+            nxt = node.get(sig)
+            if nxt is None:
+                break  # cache miss from here onward
+            node = nxt
+            path.append(node)
+            if node.tokens is not None:
+                longest_prefix_tokens = node.tokens
+
+        billed_new_tokens = max(total_in - longest_prefix_tokens, 0)
+
+        # update idealised counters
+        self._ideal_usage.input_tokens += total_in
+        self._ideal_usage.input_tokens_cache_write += billed_new_tokens
+        self._ideal_usage.output_tokens += usage.output_tokens or 0
+
+        # insert missing nodes & store this prefix’s token count
+        for sig in map(_message_signature, messages[len(path) - 1 :]):  # only the new tail
+            new_node = _TrieNode()
+            path[-1][sig] = new_node
+            path.append(new_node)
+
+        path[-1].tokens = total_in  # mark full prompt
+
+        delta = IdealizedModelUsage(
+            input_tokens=total_in,
+            input_tokens_cache_write=billed_new_tokens,
+            output_tokens=usage.output_tokens or 0,
+        )
+        record_idealized_model_usage(str(self), delta)
 
     # function to verify that its okay to call model apis
     def verify_model_apis(self) -> None:
@@ -1463,10 +1557,12 @@ def set_total_messages(input: str | list[ChatMessage]) -> None:
 
 def init_model_usage() -> None:
     model_usage_context_var.set({})
+    idealized_model_usage_context_var.set({})
 
 
 def init_sample_model_usage() -> None:
     sample_model_usage_context_var.set({})
+    sample_idealized_model_usage_context_var.set({})
 
 
 def record_and_check_model_usage(model: str, usage: ModelUsage) -> None:
@@ -1508,11 +1604,58 @@ def sample_model_usage() -> dict[str, ModelUsage]:
     return sample_model_usage_context_var.get()
 
 
+sample_model_usage_context_var: ContextVar[dict[str, ModelUsage]] = ContextVar(
+    "sample_model_usage", default={}
+)
+
+
 def sample_total_tokens() -> int:
     total_tokens = [usage.total_tokens for usage in iter(sample_model_usage().values())]
     return sum(total_tokens)
 
 
-sample_model_usage_context_var: ContextVar[dict[str, ModelUsage]] = ContextVar(
-    "sample_model_usage", default={}
+def idealized_model_usage() -> dict[str, IdealizedModelUsage]:
+    return idealized_model_usage_context_var.get()
+
+
+idealized_model_usage_context_var: ContextVar[dict[str, IdealizedModelUsage]] = ContextVar(
+    "idealized_model_usage", default={}
 )
+
+
+def sample_idealized_model_usage() -> dict[str, IdealizedModelUsage]:
+    return sample_idealized_model_usage_context_var.get()
+
+
+sample_idealized_model_usage_context_var: ContextVar[dict[str, IdealizedModelUsage]] = (
+    ContextVar("sample_idealized_model_usage", default={})
+)
+
+
+def record_idealized_model_usage(model: str, delta: IdealizedModelUsage) -> None:
+    """
+    Push *delta* into the two task-local accumulators.
+
+    We copy the delta for the 2nd accumulator to avoid mutating the same
+    IdealizedModelUsage instance twice.
+    """
+    _accumulate_idealized_model(model, delta, idealized_model_usage_context_var)
+
+    _accumulate_idealized_model(
+        model, delta.model_copy(), sample_idealized_model_usage_context_var
+    )
+
+
+def _accumulate_idealized_model(
+    model: str, delta: IdealizedModelUsage, var: ContextVar[dict[str, IdealizedModelUsage]]
+) -> None:
+    store = var.get(None)
+    if store is None:
+        store = {}
+        var.set(store)
+
+    current = store.get(model)
+    if current is None:
+        store[model] = delta
+    else:
+        current += delta
