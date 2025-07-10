@@ -902,6 +902,9 @@ class EvalStats(BaseModel):
     model_usage: dict[str, ModelUsage] = Field(default_factory=dict)
     """Model token usage for evaluation."""
 
+    idealized_model_usage: dict[str, ModelUsage] = Field(default_factory=dict)
+    """Theoretical model token usage if provider perfectly cached all prompts."""
+
     # allow field model_usage
     model_config = ConfigDict(protected_namespaces=())
 
