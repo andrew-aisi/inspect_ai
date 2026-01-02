@@ -165,6 +165,14 @@ def records_to_pandas(records: list[dict[str, ColumnType]]) -> "pd.DataFrame":
 
     # arrow backed df w/ our types mapper
     df = pd.DataFrame(records)
+
+    # Convert object columns to nullable string type to handle mixed types.
+    # Columns with both string values and NaN/None cause pyarrow to fail
+    # because NaN is a float, creating a type mismatch.
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].astype("string")
+
     table = pa.Table.from_pandas(df)
     return table.to_pandas(types_mapper=arrow_types_mapper)
 
