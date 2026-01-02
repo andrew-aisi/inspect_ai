@@ -71,6 +71,10 @@ def import_record(
     # to columns that yield their value using a callable.
     record_target = record
     record_summary: dict[str, JsonValue] | None = None
+
+    # Convert eval log to dict for EvalColumn path lookups when processing samples
+    log_record: dict[str, JsonValue] = model_to_record(log)
+
     if isinstance(record, EvalSample):
         record_summary = model_to_record(record.summary())
         record = model_to_record(record)
@@ -126,18 +130,19 @@ def import_record(
                     matches = column.path.find(
                         record if column._full else record_summary
                     )
+                # eval columns should read from the eval log, not the sample record
+                elif isinstance(column, EvalColumn):
+                    matches = column.path.find(log_record)
                 else:
                     matches = column.path.find(record)
 
                 if matches:
                     value = matches[0].value
             # some eval columns yield their value with an extract function
-            elif (
-                isinstance(column, EvalColumn)
-                and column._extract_eval is not None
-                and isinstance(record_target, EvalLog)
-            ):
-                value = column._extract_eval(record_target)
+            elif isinstance(column, EvalColumn) and column._extract_eval is not None:
+                # Always use log (EvalLog) for EvalColumn extraction, even when
+                # processing samples (where record_target would be the sample)
+                value = column._extract_eval(log)
             # some sample columns yield their value with an extract function
             elif (
                 isinstance(column, SampleColumn)
